@@ -1,0 +1,218 @@
+name: Sync upstream and build apps
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-auto-build-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      should_build: ${{ steps.sync.outputs.should_build }}
+      build_sha: ${{ steps.sync.outputs.build_sha }}
+      upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
+    steps:
+      - name: Check out fork default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge latest upstream dev
+        id: sync
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/xiaoyaocz/dart_simple_live.git
+          git fetch --no-tags upstream dev
+
+          upstream_sha="$(git rev-parse FETCH_HEAD)"
+          should_build=false
+
+          if ! git merge-base --is-ancestor "$upstream_sha" HEAD; then
+            if git merge-base --is-ancestor HEAD "$upstream_sha"; then
+              git merge --ff-only "$upstream_sha"
+            else
+              git merge --no-edit "$upstream_sha"
+            fi
+            git push origin HEAD:main
+            should_build=true
+          fi
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            should_build=true
+          fi
+
+          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
+          echo "build_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+
+  build-android-phone:
+    needs: sync
+    if: needs.sync.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out synchronized source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.sync.outputs.build_sha }}
+
+      - name: Set up Java
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880
+        with:
+          distribution: zulu
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd
+        with:
+          packages: |
+            platform-tools
+            platforms;android-36
+            build-tools;35.0.0
+            ndk;28.2.13676358
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        with:
+          channel: stable
+          flutter-version-file: simple_live_app/.fvmrc
+          cache: true
+
+      - name: Configure Android JDK
+        run: flutter config --jdk-dir "$JAVA_HOME"
+
+      - name: Restore packages
+        working-directory: simple_live_app
+        run: flutter pub get
+
+      - name: Build phone APKs
+        working-directory: simple_live_app
+        run: flutter build apk --debug --split-per-abi
+
+      - name: Upload phone APKs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: simple-live-phone-debug-apks
+          path: simple_live_app/build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+  build-android-tv:
+    needs: sync
+    if: needs.sync.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out synchronized source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.sync.outputs.build_sha }}
+
+      - name: Set up Java
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880
+        with:
+          distribution: zulu
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd
+        with:
+          packages: |
+            platform-tools
+            platforms;android-36
+            build-tools;35.0.0
+            ndk;28.2.13676358
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        with:
+          channel: stable
+          flutter-version-file: simple_live_tv_app/.fvmrc
+          cache: true
+
+      - name: Configure Android JDK
+        run: flutter config --jdk-dir "$JAVA_HOME"
+
+      - name: Restore packages
+        working-directory: simple_live_tv_app
+        run: flutter pub get
+
+      - name: Build Android TV APKs
+        working-directory: simple_live_tv_app
+        run: flutter build apk --debug --split-per-abi
+
+      - name: Upload Android TV APKs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: simple-live-tv-debug-apks
+          path: simple_live_tv_app/build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+  build-ios:
+    needs: sync
+    if: needs.sync.outputs.should_build == 'true'
+    runs-on: macos-15-intel
+    permissions:
+      contents: read
+    env:
+      XCODE_VERSION: "26.3"
+    steps:
+      - name: Check out synchronized source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.sync.outputs.build_sha }}
+
+      - name: Select Xcode
+        run: sudo xcode-select --switch "/Applications/Xcode_${{ env.XCODE_VERSION }}.app/Contents/Developer"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        with:
+          channel: stable
+          flutter-version-file: simple_live_app/.fvmrc
+          cache: true
+
+      - name: Restore packages
+        working-directory: simple_live_app
+        run: flutter pub get
+
+      - name: Build unsigned iOS app
+        working-directory: simple_live_app
+        run: flutter build ios --release --no-codesign
+
+      - name: Package unsigned IPA
+        working-directory: simple_live_app
+        run: |
+          set -euo pipefail
+          mkdir -p build/ios/iphoneos/Payload
+          ditto build/ios/iphoneos/Runner.app build/ios/iphoneos/Payload/Runner.app
+          (cd build/ios/iphoneos && /usr/bin/zip -qr simple-live-ios-unsigned.ipa Payload)
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: simple-live-ios-unsigned-ipa
+          path: simple_live_app/build/ios/iphoneos/simple-live-ios-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
